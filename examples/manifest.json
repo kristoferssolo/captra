@@ -1,0 +1,13 @@
+{
+  "plugin": "formatter-v1",
+  "version": "0.1",
+  "capabilities": {
+    "fs": {
+      "read": [
+        "./workspace/*"
+      ],
+      "write": []
+    }
+  },
+  "issued_by": "dev-team"
+}

@@ -10,3 +10,15 @@ keywords = ["wasm", "sandbox", "capabilities", "plugins", "traces"]
 categories = ["cryptography::randomness", "encoding"]
 
 [dependencies]
+color-eyre = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+claims = "0.8"
+
+[lints.clippy]
+pedantic = "warn"
+nursery = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
