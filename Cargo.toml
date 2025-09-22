@@ -1,0 +1,12 @@
+[package]
+name = "captra"
+authors = ["Kristofers Solo <dev@kristofers.xyz>"]
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/kristoferssolo/captra"
+description = "Deterministic WASM plugin host with traceable repros"
+license = "MIT OR Apache-2.0"
+keywords = ["wasm", "sandbox", "capabilities", "plugins", "traces"]
+categories = ["cryptography::randomness", "encoding"]
+
+[dependencies]
