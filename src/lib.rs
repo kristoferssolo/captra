@@ -2,6 +2,7 @@ use color_eyre::eyre::Result;
 use glob::Pattern;
 use serde::{Deserialize, Serialize};
 use std::{fs::read_to_string, path::Path};
+use tracing::{Level, info};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FsCapability {
@@ -29,21 +30,36 @@ pub struct CapabilityManifest {
     // TODO: add signature
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceEvent {
+    pub seq: u64,
+    pub event_type: String,
+    pub input: String,
+    pub outcome: bool,
+}
+
+#[derive(Debug)]
 pub struct HostState {
     pub manifest: CapabilityManifest,
+    pub trace: Vec<TraceEvent>,
 }
 
 impl HostState {
     #[inline]
     #[must_use]
     pub const fn new(manifest: CapabilityManifest) -> Self {
-        Self { manifest }
+        Self {
+            manifest,
+            trace: Vec::new(),
+        }
     }
 
     /// Simulate "plugin execution": check if path is allowed via FS read cap.
     /// Returns `true` if allowed, `false` if denied.
     #[must_use]
-    pub fn execute_plugin<P: AsRef<Path>>(&self, path: P) -> bool {
+    pub fn execute_plugin<P: AsRef<Path>>(&mut self, path: P) -> bool {
+        let seq = u64::try_from(self.trace.len()).map_or_else(|_| 1, |len| len + 1);
+
         let Some(fs_cap) = &self.manifest.capabilities.fs else {
             return false;
         };
@@ -54,11 +70,34 @@ impl HostState {
 
         let path_str = path.as_ref().to_string_lossy();
 
-        read_patterns.iter().any(|pattern| {
+        let is_allowed = read_patterns.iter().any(|pattern| {
             Pattern::new(pattern)
                 .map(|p| p.matches(&path_str))
                 .unwrap_or(false)
-        })
+        });
+
+        info!(
+            seq = seq,
+            event_type = "cap.call",
+            input = %path_str,
+            outcome = is_allowed,
+            plugin = %self.manifest.plugin
+        );
+
+        self.trace.push(TraceEvent {
+            seq,
+            event_type: "cap.call".into(),
+            input: path_str.into(),
+            outcome: is_allowed,
+        });
+
+        is_allowed
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn finalize_trace(&self) -> String {
+        serde_json::to_string_pretty(&self.trace).unwrap_or_else(|_| "[]".into())
     }
 }
 
@@ -73,10 +112,19 @@ pub fn load_manifest(path: &str) -> Result<CapabilityManifest> {
     Ok(manifest)
 }
 
+pub fn init_tracing() {
+    tracing_subscriber::fmt().with_max_level(Level::INFO).init();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use claims::assert_some;
+    use claims::{assert_ok, assert_some};
+
+    #[test]
+    fn tracing_init() {
+        init_tracing();
+    }
 
     #[test]
     fn manifest_loader() {
@@ -94,13 +142,35 @@ mod tests {
     }
 
     #[test]
-    fn host_enforcement() {
-        let manifest = load_manifest("examples/manifest.json").expect("Load failed");
-        let host = HostState::new(manifest);
+    fn host_enforcement_with_trace() {
+        init_tracing();
 
-        // Allowed: matches ./workspace/*
-        assert!(host.execute_plugin("./workspace/config.toml"));
-        // Disallowed: outside pattern
-        assert!(!host.execute_plugin("/etc/passwd"))
+        let manifest = load_manifest("examples/manifest.json").expect("Load failed");
+        let mut host = HostState::new(manifest);
+
+        // allowed - expect a tracing event
+        let out1 = host.execute_plugin("./workspace/config.toml");
+        assert!(out1);
+
+        // denied - event + entry
+        let out2 = host.execute_plugin("/etc/passwd");
+        assert!(!out2);
+
+        assert_eq!(host.trace.len(), 2);
+
+        let trace1 = assert_some!(host.trace.first());
+        assert_eq!(trace1.seq, 1);
+        assert_eq!(trace1.event_type, "cap.call");
+        assert_eq!(trace1.input, "./workspace/config.toml");
+        assert!(trace1.outcome);
+
+        let trace2 = assert_some!(host.trace.get(1));
+        assert_eq!(trace2.seq, 2);
+        assert_eq!(trace2.input, "/etc/passwd");
+        assert!(!trace2.outcome);
+
+        let json = host.finalize_trace();
+        let parsed = assert_ok!(serde_json::from_str::<Vec<TraceEvent>>(&json));
+        assert_eq!(parsed.len(), 2);
     }
 }
