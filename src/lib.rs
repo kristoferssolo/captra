@@ -1,5 +1,6 @@
 use color_eyre::eyre::Result;
 use glob::Pattern;
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, read_to_string},
@@ -7,7 +8,10 @@ use std::{
 };
 use tracing::{Level, info};
 
-#[derive(Debug, Serialize, Deserialize)]
+/// Prime for seq hashing to derive per-event RNG state
+const PRIME_MULTIPLIER: u64 = 314_159;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FsCapability {
     pub read: Option<Vec<String>>,  // Glob patter for read
     pub write: Option<Vec<String>>, // Stub for now
@@ -19,12 +23,12 @@ pub enum Capability {
     // TODO: add Net, Cpu, etc
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Capabilities {
     pub fs: Option<FsCapability>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityManifest {
     pub plugin: String,
     pub version: String,
@@ -39,21 +43,24 @@ pub struct TraceEvent {
     pub event_type: String,
     pub input: String,
     pub outcome: bool,
+    pub ts_seed: u64,
 }
 
 #[derive(Debug)]
 pub struct HostState {
     pub manifest: CapabilityManifest,
     pub trace: Vec<TraceEvent>,
+    pub seed: u64,
 }
 
 impl HostState {
     #[inline]
     #[must_use]
-    pub const fn new(manifest: CapabilityManifest) -> Self {
+    pub const fn new(manifest: CapabilityManifest, seed: u64) -> Self {
         Self {
             manifest,
             trace: Vec::new(),
+            seed,
         }
     }
 
@@ -61,8 +68,6 @@ impl HostState {
     /// Returns `true` if allowed, `false` if denied.
     #[must_use]
     pub fn execute_plugin<P: AsRef<Path>>(&mut self, path: P) -> bool {
-        let seq = u64::try_from(self.trace.len()).map_or_else(|_| 1, |len| len + 1);
-
         let Some(fs_cap) = &self.manifest.capabilities.fs else {
             return false;
         };
@@ -71,7 +76,11 @@ impl HostState {
             return false;
         };
 
+        let seq = u64::try_from(self.trace.len()).map_or(1, |len| len + 1);
         let path_str = path.as_ref().to_string_lossy();
+
+        let mut rng = StdRng::seed_from_u64(self.seed.wrapping_mul(PRIME_MULTIPLIER + seq));
+        let ts_seed = rng.random();
 
         let is_allowed = read_patterns.iter().any(|pattern| {
             Pattern::new(pattern)
@@ -81,6 +90,7 @@ impl HostState {
 
         info!(
             seq = seq,
+            ts_seed = ts_seed,
             event_type = "cap.call",
             input = %path_str,
             outcome = is_allowed,
@@ -92,6 +102,7 @@ impl HostState {
             event_type: "cap.call".into(),
             input: path_str.into(),
             outcome: is_allowed,
+            ts_seed,
         });
 
         is_allowed
@@ -152,7 +163,7 @@ mod tests {
 
     #[test]
     fn manifest_loader() {
-        let manifest = load_manifest("examples/manifest.json").expect("Load failed");
+        let manifest = assert_ok!(load_manifest("examples/manifest.json"), "Load failed");
         assert_eq!(manifest.plugin, "formatter-v1");
         assert_eq!(manifest.version, "0.1");
         assert_eq!(manifest.issued_by, "dev-team");
@@ -169,8 +180,9 @@ mod tests {
     fn host_enforcement_with_trace() {
         init_tracing();
 
-        let manifest = load_manifest("examples/manifest.json").expect("Load failed");
-        let mut host = HostState::new(manifest);
+        let manifest = assert_ok!(load_manifest("examples/manifest.json"), "Load failed");
+        let fixed_seed = 12345;
+        let mut host = HostState::new(manifest, fixed_seed);
 
         // allowed - expect a tracing event
         let out1 = host.execute_plugin("./workspace/config.toml");
@@ -186,18 +198,22 @@ mod tests {
         assert_eq!(trace1.event_type, "cap.call");
         assert_eq!(trace1.input, "./workspace/config.toml");
         assert!(trace1.outcome);
+        assert_eq!(trace1.ts_seed, 8_166_419_713_379_829_776);
+        assert_ne!(trace1.ts_seed, 0);
 
         let trace2 = assert_some!(host.trace.get(1));
         assert_eq!(trace2.seq, 2);
         assert_eq!(trace2.input, "/etc/passwd");
         assert!(!trace2.outcome);
+        assert_eq!(trace2.ts_seed, 10_553_447_931_939_622_718);
+        assert_ne!(trace1.ts_seed, trace2.ts_seed);
 
         let tmp_dir = tempdir().expect("Temp dir failed");
         let tmp_path = tmp_dir.as_ref().join("trace.json");
 
-        assert_ok!(host.save_trace(&tmp_path));
+        assert_ok!(host.save_trace(&tmp_path), "Save failed");
 
-        let loaded_trace = assert_ok!(HostState::load_trace(tmp_path));
+        let loaded_trace = assert_ok!(HostState::load_trace(tmp_path), "Load failed");
         assert_eq!(loaded_trace.len(), 2);
 
         let loaded_trace1 = assert_some!(loaded_trace.first());
@@ -205,5 +221,27 @@ mod tests {
 
         let loaded_trace2 = assert_some!(loaded_trace.get(1));
         assert_eq!(trace2, loaded_trace2);
+    }
+
+    #[test]
+    fn trace_reproducibility() {
+        init_tracing();
+
+        let manifest = assert_ok!(load_manifest("examples/manifest.json"), "Load failed");
+
+        let fixed_seed = 12345;
+
+        let mut host1 = HostState::new(manifest.clone(), fixed_seed);
+        assert!(!host1.execute_plugin("./allowed.txt"));
+        let trace1 = host1.finalize_trace();
+
+        let mut host2 = HostState::new(manifest, fixed_seed);
+        assert!(!host2.execute_plugin("./allowed.txt"));
+        let trace2 = host2.finalize_trace();
+
+        let parsed1 = assert_ok!(serde_json::from_str::<Vec<TraceEvent>>(&trace1));
+        let parsed2 = assert_ok!(serde_json::from_str::<Vec<TraceEvent>>(&trace2));
+        assert_eq!(parsed1, parsed2);
+        assert_eq!(parsed1[0].ts_seed, parsed2[0].ts_seed);
     }
 }
