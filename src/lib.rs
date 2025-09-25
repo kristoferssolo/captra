@@ -1,7 +1,10 @@
 use color_eyre::eyre::Result;
 use glob::Pattern;
 use serde::{Deserialize, Serialize};
-use std::{fs::read_to_string, path::Path};
+use std::{
+    fs::{self, read_to_string},
+    path::Path,
+};
 use tracing::{Level, info};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -30,7 +33,7 @@ pub struct CapabilityManifest {
     // TODO: add signature
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TraceEvent {
     pub seq: u64,
     pub event_type: String,
@@ -99,6 +102,26 @@ impl HostState {
     pub fn finalize_trace(&self) -> String {
         serde_json::to_string_pretty(&self.trace).unwrap_or_else(|_| "[]".into())
     }
+
+    /// Save the current trace to a file as pretty JSON.
+    /// # Errors
+    /// If file write fails (e.g., I/O error) or JSON serialization fails.
+    pub fn save_trace<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let json_str = serde_json::to_string_pretty(&self.trace)?;
+        fs::write(path, json_str)?;
+        Ok(())
+    }
+
+    /// Load a trace from a JSON file to Vec<TraceEvent>.
+    ///
+    /// # Errors
+    ///
+    /// If file read fails (e.g., I/O error) or JSON parsing fails.
+    pub fn load_trace<P: AsRef<Path>>(path: P) -> Result<Vec<TraceEvent>> {
+        let json_str = fs::read_to_string(path)?;
+        let trace = serde_json::from_str(&json_str)?;
+        Ok(trace)
+    }
 }
 
 /// Loads a capability manifest from a JSON file.
@@ -120,6 +143,7 @@ pub fn init_tracing() {
 mod tests {
     use super::*;
     use claims::{assert_ok, assert_some};
+    use tempfile::tempdir;
 
     #[test]
     fn tracing_init() {
@@ -151,7 +175,6 @@ mod tests {
         // allowed - expect a tracing event
         let out1 = host.execute_plugin("./workspace/config.toml");
         assert!(out1);
-
         // denied - event + entry
         let out2 = host.execute_plugin("/etc/passwd");
         assert!(!out2);
@@ -169,8 +192,18 @@ mod tests {
         assert_eq!(trace2.input, "/etc/passwd");
         assert!(!trace2.outcome);
 
-        let json = host.finalize_trace();
-        let parsed = assert_ok!(serde_json::from_str::<Vec<TraceEvent>>(&json));
-        assert_eq!(parsed.len(), 2);
+        let tmp_dir = tempdir().expect("Temp dir failed");
+        let tmp_path = tmp_dir.as_ref().join("trace.json");
+
+        assert_ok!(host.save_trace(&tmp_path));
+
+        let loaded_trace = assert_ok!(HostState::load_trace(tmp_path));
+        assert_eq!(loaded_trace.len(), 2);
+
+        let loaded_trace1 = assert_some!(loaded_trace.first());
+        assert_eq!(trace1, loaded_trace1);
+
+        let loaded_trace2 = assert_some!(loaded_trace.get(1));
+        assert_eq!(trace2, loaded_trace2);
     }
 }

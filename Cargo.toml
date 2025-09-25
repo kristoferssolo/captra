@@ -19,9 +19,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [dev-dependencies]
 claims = "0.8"
+tempfile = "3.23"
 
 [lints.clippy]
 pedantic = "warn"
 nursery = "warn"
 unwrap_used = "warn"
-expect_used = "warn"
