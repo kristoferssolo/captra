@@ -82,7 +82,7 @@ pub fn save_trace<P: AsRef<Path>>(trace: &[TraceEvent], path: P) -> Result<(), T
     Ok(())
 }
 
-/// Load a trace from a JSON file to Vec<TraceEvent>.
+/// Load a trace from a JSON file to [`Vec<TraceEvent>`].
 ///
 /// # Errors
 ///

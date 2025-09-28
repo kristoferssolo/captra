@@ -1,3 +1,6 @@
+mod common;
+
+use crate::common::host::make_host_with_seed;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use captra::{
     CapError, EventType, HostState, ManifestError, TraceEvent, init_tracing, load_manifest,
@@ -83,67 +86,81 @@ fn manifest_validation_invalid() {
 }
 
 #[test]
-fn host_enforcement_with_trace() {
+fn host_enforcement_allowed() {
     init_tracing();
+    let mut host = make_host_with_seed(12_345);
 
-    let manifest = assert_ok!(load_manifest("examples/manifest.json"), "Load failed");
-    let fixed_seed = 12345;
-    let mut csprng = OsRng;
-    let keypair = SigningKey::generate(&mut csprng);
-    let mut host = HostState::new(manifest, fixed_seed, keypair);
+    let result = assert_ok!(host.execute_plugin("./workspace/config.toml"));
+    assert!(result);
 
-    assert_eq!(host.run_id(), "captra-run-12345");
+    assert_eq!(host.trace().len(), 1);
+    let ev = assert_some!(host.trace().first());
 
-    // allowed - expect a tracing event
-    let out1 = assert_ok!(host.execute_plugin("./workspace/config.toml"));
-    assert!(out1);
-    // denied - event + entry
-    let out2 = assert_err!(host.execute_plugin("/etc/passwd"));
-    assert_eq!(out2, CapError::GlobMismatch);
+    assert_eq!(ev.run_id, "captra-run-12345");
+    assert_eq!(ev.seq, 1);
+    assert_matches!(ev.event_type, EventType::CapCall);
+    assert_eq!(ev.input, "./workspace/config.toml");
+    assert!(ev.outcome);
+    assert_eq!(ev.ts_seed, 8_166_419_713_379_829_776);
+}
 
-    {
-        assert_eq!(host.trace().len(), 2); // Both allowed/denied log to trace.
+#[test]
+fn host_enforcement_denied() {
+    init_tracing();
+    let mut host = make_host_with_seed(12_345);
 
-        let trace1 = assert_some!(host.trace().get(0));
-        assert_eq!(trace1.seq, 1);
-        assert_eq!(trace1.event_type, EventType::CapCall);
-        assert_eq!(trace1.input, "./workspace/config.toml");
-        assert!(trace1.outcome);
-        assert_eq!(trace1.ts_seed, 8_166_419_713_379_829_776);
-        assert_ne!(trace1.ts_seed, 0);
+    let err = assert_err!(host.execute_plugin("/etc/passwd"));
+    assert_matches!(err, CapError::GlobMismatch);
 
-        let trace2 = assert_some!(host.trace().get(1));
-        assert_eq!(trace2.run_id, "captra-run-12345");
-        assert_eq!(trace2.seq, 2);
-        assert_eq!(trace2.event_type, EventType::CapCall);
-        assert!(!trace2.outcome);
-        assert!(trace2.input.starts_with("glob_mismatch: "));
-        assert_eq!(trace2.ts_seed, 10_553_447_931_939_622_718);
-        assert_ne!(trace1.ts_seed, trace2.ts_seed);
-    }
+    assert_eq!(host.trace().len(), 1);
+    let ev = assert_some!(host.trace().first());
+
+    assert_eq!(ev.run_id, "captra-run-12345");
+    assert_eq!(ev.seq, 1);
+    assert_matches!(ev.event_type, EventType::CapCall);
+    assert!(!ev.outcome);
+    assert!(ev.input.starts_with("glob_mismatch: "));
+    assert_eq!(ev.ts_seed, 8_166_419_713_379_829_776);
+}
+
+#[test]
+fn host_enforcement_signed() {
+    init_tracing();
+    let mut host = make_host_with_seed(12_345);
+
+    let _ = assert_ok!(host.execute_plugin("./workspace/config.toml"));
 
     let signed = assert_ok!(host.sign_current_trace());
     assert_eq!(signed.run_id, "captra-run-12345");
 
-    let sig_bytes = STANDARD.decode(&signed.signature).expect("Base64 decode");
+    let sig_bytes = STANDARD.decode(&signed.signature).expect("base64 decode");
     assert_eq!(sig_bytes.len(), 64);
     assert!(!signed.trace_json.is_empty()); // Nonempty JSON
+}
 
-    // Save/load roundtrip
-    let tmp_dir = tempdir().expect("Temp dir failed");
+#[test]
+fn host_enforcement_save_round_trip() {
+    init_tracing();
+    let mut host = make_host_with_seed(12_345);
+
+    let _ = assert_ok!(host.execute_plugin("./workspace/config.toml"));
+    let _ = assert_err!(host.execute_plugin("/etc/passwd"));
+
+    let tmp_dir = tempdir().expect("tempdir");
     let tmp_path = tmp_dir.as_ref().join("trace.json");
+
+    // Save and laod
     assert_ok!(host.save_current_trace(&tmp_path), "Save failed");
 
-    let loaded_trace = assert_ok!(load_trace(tmp_path), "Load failed");
-    assert_eq!(loaded_trace.len(), 2);
+    let loaded = assert_ok!(load_trace(tmp_path), "Load failed");
+    assert_eq!(loaded.len(), 2);
 
-    let trace1_refetched = assert_some!(host.trace().get(0));
-    let trace2_refetched = assert_some!(host.trace().get(1));
-    let loaded_trace1 = assert_some!(loaded_trace.get(0));
-    let loaded_trace2 = assert_some!(loaded_trace.get(1));
+    let current_trace = host.trace();
+    assert_eq!(loaded, current_trace);
 
-    assert_eq!(trace1_refetched, loaded_trace1);
-    assert_eq!(trace2_refetched, loaded_trace2);
+    let loaded_first = assert_some!(loaded.first());
+    let current_first = assert_some!(current_trace.first());
+    assert_eq!(loaded_first, current_first);
 }
 
 #[test]
@@ -152,7 +169,7 @@ fn trace_reproducibility() {
 
     let manifest = assert_ok!(load_manifest("examples/manifest.json"), "Load failed");
 
-    let fixed_seed = 12345;
+    let fixed_seed = 12_345;
     let mut csprng1 = OsRng;
     let keypair1 = SigningKey::generate(&mut csprng1);
 

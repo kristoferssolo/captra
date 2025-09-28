@@ -1,10 +1,9 @@
 mod common;
 
+use crate::common::{host::make_host_with_seed, wasm::wasm_store_with_hosts};
 use captra::HostStatus;
 use claims::{assert_ok, assert_some};
 use wasmtime::Module;
-
-use crate::common::{make_host_with_seed, wasm_store_with_hosts};
 
 #[test]
 fn wasm_integration_allowed() {
@@ -28,7 +27,7 @@ fn wasm_integration_allowed() {
                 )
           )
     "#,
-        len = path.as_bytes().len()
+        len = path.len()
     );
 
     let module = assert_ok!(Module::new(&engine, &wat));
