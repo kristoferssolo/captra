@@ -1,26 +1,17 @@
 mod common;
 
-use captra::{HostState, HostStatus, add_wasm_linker_funcs, load_manifest};
+use captra::HostStatus;
 use claims::{assert_ok, assert_some};
-use ed25519_dalek::SigningKey;
-use rand::rngs::OsRng;
-use wasmtime::{Engine, Linker, Module, Store};
+use wasmtime::Module;
+
+use crate::common::{make_host_with_seed, wasm_store_with_hosts};
 
 #[test]
 fn wasm_integration_allowed() {
-    let manifest = assert_ok!(load_manifest("examples/manifest.json"), "Load failed");
-    let fixed_seed = 12345;
-    let mut csprng = OsRng;
-    let keypair = SigningKey::generate(&mut csprng);
-    let host = HostState::new(manifest, fixed_seed, keypair);
-
-    let engine = Engine::default();
-    let mut linker = Linker::new(&engine);
-
-    assert_ok!(add_wasm_linker_funcs(&mut linker));
+    let host = make_host_with_seed(12345);
+    let (engine, linker, mut store) = wasm_store_with_hosts(host);
 
     let path = "./workspace/test.txt";
-    let path_len = path.as_bytes().len();
     let wat = format!(
         r#"
         (module
@@ -30,21 +21,19 @@ fn wasm_integration_allowed() {
           (data (i32.const 0) "{path}")
           (func (export "run") (result i32)
                 i32.const 0
-                i32.const {path_len}
+                i32.const {len}
                 call $host_read_file
                 call $host_status_allowed
                 i32.eq    ;; returns 1 if allowed, 0 if denied, -1 if error
                 )
           )
-    "#
+    "#,
+        len = path.as_bytes().len()
     );
 
-    let module = assert_ok!(Module::new(&engine, wat));
-    let mut store = Store::new(&engine, host);
-
+    let module = assert_ok!(Module::new(&engine, &wat));
     let instance = assert_ok!(linker.instantiate(&mut store, &module));
     let run = assert_ok!(instance.get_typed_func::<(), i32>(&mut store, "run"));
-
     let ret = assert_ok!(run.call(&mut store, ()));
     assert_eq!(ret, HostStatus::Denied as i32);
 

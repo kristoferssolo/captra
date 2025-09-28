@@ -1,8 +1,7 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use captra::{
-    host::{CapError, HostState, init_tracing},
-    manifest::{ManifestError, load_manifest},
-    trace::{EventType, TraceEvent, load_trace},
+    CapError, EventType, HostState, ManifestError, TraceEvent, init_tracing, load_manifest,
+    load_trace,
 };
 use claims::{assert_err, assert_matches, assert_ok, assert_some};
 use ed25519_dalek::SigningKey;
