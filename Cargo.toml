@@ -17,6 +17,8 @@ glob = "0.3"
 rand = "0.8"                                                                # ed25519-dalek depends on rand_core v0.6
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10.9"
+thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
