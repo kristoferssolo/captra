@@ -1,0 +1,38 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: --deny warnings
+  RUSTDOCFLAGS: --deny warnings
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: "sccache"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+      - name: Run sccache-cache
+        uses: mozilla-actions/sccache-action@v0.0.9
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@cargo-nextest
+      - name: Run Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Run formatting
+        run: cargo fmt --all --check
+      - name: Run Tests
+        run: |
+          cargo nextest run --all-features --all-targets
+          cargo test --locked --workspace --all-features --doc
+      - name: Check Documentation
+        run: cargo doc --locked --workspace --all-features --document-private-items --no-deps
