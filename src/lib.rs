@@ -1,4 +1,5 @@
 use color_eyre::eyre::Result;
+use ed25519_dalek::{PUBLIC_KEY_LENGTH, SigningKey};
 use glob::Pattern;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serde::{Deserialize, Serialize};
@@ -46,21 +47,34 @@ pub struct TraceEvent {
     pub ts_seed: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedTrace {
+    pub run_id: String,
+    pub manifest_hash: String,
+    pub trace_json: String,
+    pub signature: String,
+}
+
 #[derive(Debug)]
 pub struct HostState {
     pub manifest: CapabilityManifest,
     pub trace: Vec<TraceEvent>,
     pub seed: u64,
+    pub keypair: SigningKey,
+    pub pubkey: [u8; PUBLIC_KEY_LENGTH],
 }
 
 impl HostState {
     #[inline]
     #[must_use]
-    pub const fn new(manifest: CapabilityManifest, seed: u64) -> Self {
+    pub fn new(manifest: CapabilityManifest, seed: u64, keypair: SigningKey) -> Self {
+        let pubkey = keypair.verifying_key().to_bytes();
         Self {
             manifest,
             trace: Vec::new(),
             seed,
+            keypair,
+            pubkey,
         }
     }
 
@@ -80,7 +94,7 @@ impl HostState {
         let path_str = path.as_ref().to_string_lossy();
 
         let mut rng = StdRng::seed_from_u64(self.seed.wrapping_mul(PRIME_MULTIPLIER + seq));
-        let ts_seed = rng.random();
+        let ts_seed = rng.r#gen();
 
         let is_allowed = read_patterns.iter().any(|pattern| {
             Pattern::new(pattern)
@@ -154,6 +168,7 @@ pub fn init_tracing() {
 mod tests {
     use super::*;
     use claims::{assert_ok, assert_some};
+    use rand::rngs::OsRng;
     use tempfile::tempdir;
 
     #[test]
@@ -182,7 +197,9 @@ mod tests {
 
         let manifest = assert_ok!(load_manifest("examples/manifest.json"), "Load failed");
         let fixed_seed = 12345;
-        let mut host = HostState::new(manifest, fixed_seed);
+        let mut csprng = OsRng;
+        let keypair = SigningKey::generate(&mut csprng);
+        let mut host = HostState::new(manifest, fixed_seed, keypair);
 
         // allowed - expect a tracing event
         let out1 = host.execute_plugin("./workspace/config.toml");
@@ -230,12 +247,16 @@ mod tests {
         let manifest = assert_ok!(load_manifest("examples/manifest.json"), "Load failed");
 
         let fixed_seed = 12345;
+        let mut csprng1 = OsRng;
+        let keypair1 = SigningKey::generate(&mut csprng1);
 
-        let mut host1 = HostState::new(manifest.clone(), fixed_seed);
+        let mut host1 = HostState::new(manifest.clone(), fixed_seed, keypair1);
         assert!(!host1.execute_plugin("./allowed.txt"));
         let trace1 = host1.finalize_trace();
 
-        let mut host2 = HostState::new(manifest, fixed_seed);
+        let mut csprng2 = OsRng;
+        let keypair2 = SigningKey::generate(&mut csprng2);
+        let mut host2 = HostState::new(manifest, fixed_seed, keypair2);
         assert!(!host2.execute_plugin("./allowed.txt"));
         let trace2 = host2.finalize_trace();
 
