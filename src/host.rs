@@ -9,9 +9,10 @@ use ed25519_dalek::{PUBLIC_KEY_LENGTH, SigningKey, ed25519::signature::SignerMut
 use glob::Pattern;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::{path::Path, str::from_utf8};
 use thiserror::Error;
 use tracing::Level;
+use wasmtime::{Caller, Extern, Linker, Trap};
 
 #[derive(Debug)]
 pub struct HostState {
@@ -38,6 +39,15 @@ pub enum CapError {
 
     #[error("Invalid path provided (empty or invalid UTF-8)")]
     InvalidPath,
+}
+
+/// Host-visible status codes returned from host functions.
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostStatus {
+    Allowed = 0,
+    Denied = 1,
+    Error = -1,
 }
 
 impl HostState {
@@ -233,4 +243,74 @@ impl HostState {
 
 pub fn init_tracing() {
     tracing_subscriber::fmt().with_max_level(Level::INFO).init();
+}
+
+/// Register host functions for Wasmtime on the provided linker.
+///
+/// Exposes:
+///  - `host::read_file(ptr: i32, len: i32) -> Result<i32, Trap>`
+///  - `host::status_allowed() -> i32`
+///  - `host::status_denied() -> i32`
+///  - `host::status_error() -> i32`
+///
+/// # Errors
+///
+/// `read_file` returns `Ok(HostStatus::Allowed/Denied)` for normal outcomes,
+/// and Err(Trap) for exceptional errors (OOB, invalid pointer, invalid UTF-8).
+pub fn add_wasm_linker_funcs(linker: &mut Linker<HostState>) -> anyhow::Result<()> {
+    linker.func_wrap(
+        "host",
+        "read_file",
+        |mut caller: Caller<'_, HostState>, ptr: i32, len: i32| -> anyhow::Result<i32> {
+            let memory = caller
+                .get_export("memory")
+                .and_then(Extern::into_memory)
+                .ok_or(Trap::MemoryOutOfBounds)?;
+
+            let start = usize::try_from(ptr).map_err(|_| Trap::BadConversionToInteger)?;
+            let read_len = usize::try_from(len).map_err(|_| Trap::BadConversionToInteger)?;
+
+            let data = memory.data(&caller);
+
+            if start
+                .checked_add(read_len)
+                .is_none_or(|end| end > data.len())
+            {
+                return Err(Trap::MemoryOutOfBounds.into());
+            }
+
+            let bytes = &data[start..start + read_len];
+            let path_str = from_utf8(bytes)
+                .map_err(|_| Trap::BadConversionToInteger)?
+                .to_string();
+
+            match caller.data_mut().execute_plugin(path_str) {
+                Ok(true) => Ok(HostStatus::Allowed.into()),
+                Ok(false) => Ok(HostStatus::Denied.into()),
+                Err(err) => match err {
+                    CapError::GlobMismatch => Ok(HostStatus::Denied.into()),
+                    CapError::NoFsCapability | CapError::NoReadPatterns => {
+                        Ok(HostStatus::Denied.into())
+                    }
+                    CapError::InvalidPath => Err(Trap::MemoryOutOfBounds.into()),
+                },
+            }
+        },
+    )?;
+    linker.func_wrap("host", "status_allowed", || -> i32 {
+        HostStatus::Allowed.into()
+    })?;
+    linker.func_wrap("host", "status_denied", || -> i32 {
+        HostStatus::Denied.into()
+    })?;
+    linker.func_wrap("host", "status_error", || -> i32 {
+        HostStatus::Error.into()
+    })?;
+    Ok(())
+}
+
+impl From<HostStatus> for i32 {
+    fn from(value: HostStatus) -> Self {
+        value as Self
+    }
 }

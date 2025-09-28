@@ -10,17 +10,18 @@ keywords = ["wasm", "sandbox", "capabilities", "plugins", "traces"]
 categories = ["cryptography::randomness", "encoding"]
 
 [dependencies]
+anyhow = "1.0"
 base64 = "0.22"
-color-eyre = "0.6"
 ed25519-dalek = { version = "2.2", features = ["rand_core"] }
 glob = "0.3"
 rand = "0.8"                                                                # ed25519-dalek depends on rand_core v0.6
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-sha2 = "0.10.9"
+sha2 = "0.10"
 thiserror = "2.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+wasmtime = "37.0"
 
 [dev-dependencies]
 claims = "0.8"
